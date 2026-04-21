@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Reflex Neon Fixed</title>
+<style>
+body{
+  margin:0;
+  font-family:system-ui;
+  background:#05050c;
+  color:white;
+  overflow:hidden;
+}
+.scene{position:absolute;inset:0;display:none;}
+.scene.active{display:flex}
+#home{flex-direction:column;align-items:center;justify-content:center;gap:12px;}
+.card{min-width:180px;padding:14px;background:#1a1a2e;border-radius:12px;text-align:center;cursor:pointer;}
+#rules{flex-direction:column;align-items:center;justify-content:center;text-align:center;}
+#game{flex-direction:column}
+#gameArea{position:absolute;inset:0}
+#hud{
+  position:fixed;top:0;width:100%;background:#111;
+  padding:6px;display:none;justify-content:space-between;z-index:10;
+}
+.obj{width:52px;height:52px;position:absolute;border-radius:10px;}
+.good{background:#ff3b3b}
+.bonus{background:#ffd600}
+.bad{background:#7c4dff}
+.bomb{background:#000;border:2px solid red}
+.boss{background:#00e5ff;width:80px;height:80px}
+#pause{
+  position:fixed;inset:0;background:rgba(0,0,0,.7);
+  display:none;align-items:center;justify-content:center;
+  flex-direction:column;gap:12px;z-index:50;
+}
+.shake{animation:shake .25s linear;}
+@keyframes shake{
+  0%{transform:translate(0,0)}
+  25%{transform:translate(6px,-4px)}
+  50%{transform:translate(-6px,4px)}
+  75%{transform:translate(4px,4px)}
+  100%{transform:translate(0,0)}
+}
+.particle{
+  position:absolute;width:6px;height:6px;border-radius:50%;
+  background:white;pointer-events:none;animation:pop .5s ease-out forwards;
+}
+@keyframes pop{to{transform:translate(var(--x),var(--y));opacity:0;}}
+.combo{
+  position:absolute;font-size:20px;font-weight:bold;
+  color:#00e5ff;animation:combo .6s ease-out forwards;pointer-events:none;
+}
+@keyframes combo{to{transform:translateY(-40px);opacity:0;}}
+#rankUI{position:fixed;bottom:10px;right:10px;background:#111;padding:10px;border-radius:10px;font-size:12px;}
+</style>
+</head>
+<body>
+
+<!-- PAUSE -->
+<div id="pause">
+  <div class="card" onclick="resume()">▶ <span id="pauseResume"></span></div>
+  <div class="card" onclick="goHome()">🏠 <span id="pauseExit"></span></div>
+</div>
+
+<!-- HOME -->
+<div id="home" class="scene active">
+  <div class="card" onclick="changeLang()" id="langBtn"></div>
+  <div class="card" onclick="start('classic')" id="btnClassic"></div>
+  <div class="card" onclick="start('relax')" id="btnRelax"></div>
+  <div class="card" onclick="start('hardcore')" id="btnHard"></div>
+</div>
+
+<!-- RULES -->
+<div id="rules" class="scene">
+  <h2 id="rulesTitle"></h2>
+  <p id="rule1"></p>
+  <p id="rule2"></p>
+  <p id="rule3"></p>
+  <p id="rule4"></p>
+  <p id="rule5"></p>
+  <div class="card" onclick="confirmStart()" id="btnStart"></div>
+</div>
+
+<!-- GAME -->
+<div id="game" class="scene">
+  <div id="hud">
+    ⭐ <span id="score">0</span>
+    ❤️ <span id="life">0</span>
+    🔥 <span id="streak">0</span>
+    ⏸ <span id="hudPause" onclick="pauseGame()" style="cursor:pointer"></span>
+  </div>
+  <div id="gameArea"></div>
+</div>
+
+<div id="rankUI"></div>
+
+<script>
+
+/* ================= VIBRATION ================= */
+function vib(pattern){
+  if(navigator.vibrate) navigator.vibrate(pattern);
+}
+const vibMenu  = ()=> vib(20);                          // sutil: menú e interacciones
+const vibGood  = ()=> vib(30);                          // sutil: objeto bueno
+const vibBonus = ()=> vib([30,20,30]);                  // doble pulso: bonus
+const vibBad   = ()=> vib([80,30,80]);                  // fuerte: daño
+const vibBomb  = ()=> vib([100,40,100,40,100]);         // muy fuerte: bomba
+const vibBoss  = ()=> vib([50,30,50,30,150]);           // patrón especial: boss
+
+/* ================= AUDIO ================= */
+let audioCtx=null;
+let musicTimer=null;
+let musicStep=0;
+
+function initAudio(){
+  if(!audioCtx) audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+  if(audioCtx.state==="suspended") audioCtx.resume();
+  startMusic();
+}
+
+function startMusic(){
+  if(musicTimer) return;
+  const notes=[220,277,330,392,330,277];
+  musicTimer=setInterval(()=>{
+    if(!audioCtx||paused) return;
+    const o=audioCtx.createOscillator();
+    const g=audioCtx.createGain();
+    o.type="sine";
+    o.frequency.value=notes[musicStep%notes.length];
+    g.gain.value=0.0001;
+    g.gain.exponentialRampToValueAtTime(0.03,audioCtx.currentTime+0.05);
+    g.gain.exponentialRampToValueAtTime(0.0001,audioCtx.currentTime+0.4);
+    o.connect(g);g.connect(audioCtx.destination);
+    o.start();o.stop(audioCtx.currentTime+0.4);
+    musicStep++;
+  },400);
+}
+
+function beep(f,t=0.07,type="sine",v=0.04){
+  if(!audioCtx) return;
+  const o=audioCtx.createOscillator();
+  const g=audioCtx.createGain();
+  o.type=type;o.frequency.value=f;
+  g.gain.value=v;
+  g.gain.exponentialRampToValueAtTime(0.0001,audioCtx.currentTime+t);
+  o.connect(g);g.connect(audioCtx.destination);
+  o.start();o.stop(audioCtx.currentTime+t);
+}
+
+const sGood =()=>beep(700);
+const sBad  =()=>beep(180,0.12,"triangle");
+const sBonus=()=>beep(900);
+const sBoss =()=>beep(120,0.2,"sawtooth");
+const sClick=()=>beep(500,0.05);
+
+/* ================= LANGUAGE ================= */
+let lang=parseInt(localStorage.getItem("lang")||"0");
+
+const L=[
+  {
+    langBtn:"🌍 English",
+    rules:"Rules",
+    r1:"🟥 RED = TAP (+1 point)",
+    r2:"🟡 YELLOW = BONUS (+5 points)",
+    r3:"🟣 PURPLE = BAD (-life)",
+    r4:"⚫ BLACK = BOMB (heavy damage)",
+    r5:"🟦 BLUE = BOSS (+20 points)",
+    homeClassic:"🎮 Classic",
+    homeRelax:"😌 Relax",
+    homeHard:"🔥 Hardcore",
+    start:"▶ Start",
+    pause:"⏸ Pause",
+    resume:"Resume",
+    exit:"Exit"
+  },
+  {
+    langBtn:"🌍 Español",
+    rules:"Reglas",
+    r1:"🟥 ROJO = TOCAR (+1 punto)",
+    r2:"🟡 AMARILLO = BONUS (+5 puntos)",
+    r3:"🟣 MORADO = MALO (-vida)",
+    r4:"⚫ NEGRO = BOMBA (-vida fuerte)",
+    r5:"🟦 AZUL = BOSS (+20 puntos)",
+    homeClassic:"🎮 Clásico",
+    homeRelax:"😌 Relajado",
+    homeHard:"🔥 Extremo",
+    start:"▶ Iniciar",
+    pause:"⏸ Pausa",
+    resume:"Reanudar",
+    exit:"Salir"
+  },
+  {
+    langBtn:"🌍 Português",
+    rules:"Regras",
+    r1:"🟥 VERMELHO = TOCAR (+1 ponto)",
+    r2:"🟡 AMARELO = BONUS (+5 pontos)",
+    r3:"🟣 ROXO = RUIM (-vida)",
+    r4:"⚫ PRETO = BOMBA (-vida forte)",
+    r5:"🟦 AZUL = CHEFE (+20 pontos)",
+    homeClassic:"🎮 Clássico",
+    homeRelax:"😌 Relax",
+    homeHard:"🔥 Difícil",
+    start:"▶ Iniciar",
+    pause:"⏸ Pausa",
+    resume:"Continuar",
+    exit:"Sair"
+  }
+];
+
+// FIX: actualiza TODOS los textos de la UI completa de una vez
+function applyLang(){
+  const t=L[lang];
+  // Home
+  $("langBtn").innerText    = t.langBtn;
+  $("btnClassic").innerText = t.homeClassic;
+  $("btnRelax").innerText   = t.homeRelax;
+  $("btnHard").innerText    = t.homeHard;
+  // Rules
+  $("rulesTitle").innerText = t.rules;
+  $("rule1").innerText      = t.r1;
+  $("rule2").innerText      = t.r2;
+  $("rule3").innerText      = t.r3;
+  $("rule4").innerText      = t.r4;
+  $("rule5").innerText      = t.r5;
+  $("btnStart").innerText   = t.start;
+  // HUD en juego
+  $("hudPause").innerText   = t.pause;
+  // Pausa overlay
+  $("pauseResume").innerText= t.resume;
+  $("pauseExit").innerText  = t.exit;
+}
+
+function changeLang(){
+  lang=(lang+1)%3;
+  localStorage.setItem("lang", lang);
+  applyLang();
+  sClick();
+  vibMenu();
+}
+
+/* ================= CORE ================= */
+const $=id=>document.getElementById(id);
+
+let running=false,paused=false;
+let score=0,life=0,streak=0;
+let spawnRate=800;
+let loopId=null;
+let mode="classic";
+
+function shake(){
+  $("game").classList.add("shake");
+  setTimeout(()=>$("game").classList.remove("shake"),250);
+}
+
+function particles(x,y){
+  for(let i=0;i<10;i++){
+    const p=document.createElement("div");
+    p.className="particle";
+    const a=Math.random()*Math.PI*2;
+    const d=Math.random()*40;
+    p.style.left=x+"px";
+    p.style.top=y+"px";
+    p.style.setProperty("--x",Math.cos(a)*d+"px");
+    p.style.setProperty("--y",Math.sin(a)*d+"px");
+    document.body.appendChild(p);
+    setTimeout(()=>p.remove(),500);
+  }
+}
+
+function comboText(x,y,text){
+  const c=document.createElement("div");
+  c.className="combo";
+  c.innerText=text;
+  c.style.left=x+"px";
+  c.style.top=y+"px";
+  document.body.appendChild(c);
+  setTimeout(()=>c.remove(),600);
+}
+
+function saveScore(){
+  let d=JSON.parse(localStorage.getItem("rx")||"[]");
+  d.push(score);d.sort((a,b)=>b-a);d=d.slice(0,5);
+  localStorage.setItem("rx",JSON.stringify(d));
+}
+
+function renderRank(){
+  let d=JSON.parse(localStorage.getItem("rx")||"[]");
+  $("rankUI").innerHTML="🏆 TOP<br>"+d.join("<br>");
+}
+
+function show(id){
+  document.querySelectorAll(".scene").forEach(s=>s.classList.remove("active"));
+  $(id).classList.add("active");
+  if(id!=="game"){running=false;paused=false;clearTimeout(loopId);}
+}
+
+function start(m){
+  initAudio();vibMenu();
+  mode=m;
+  show("rules");
+}
+
+function confirmStart(){
+  initAudio();vibMenu();
+  score=0;streak=0;
+  if(mode==="relax")    {life=5;spawnRate=1100;}
+  if(mode==="classic")  {life=3;spawnRate=800;}
+  if(mode==="hardcore") {life=2;spawnRate=500;}
+  $("hud").style.display="flex";
+  running=true;paused=false;
+  show("game");
+  loop();
+}
+
+function loop(){
+  if(!running||paused) return;
+  clearTimeout(loopId);
+  loopId=setTimeout(()=>{
+    if(running&&!paused){spawn();loop();}
+  },spawnRate);
+}
+
+function spawn(){
+  const g=$("gameArea");
+  const o=document.createElement("div");
+  o.className="obj";
+  let r=Math.random();
+  if(r<0.55)      o.classList.add("good");
+  else if(r<0.7)  o.classList.add("bonus");
+  else if(r<0.85) o.classList.add("bad");
+  else if(r<0.95) o.classList.add("bomb");
+  else            o.classList.add("boss");
+
+  let size=o.classList.contains("boss")?80:52;
+  const x=Math.random()*(innerWidth-size);
+  const y=Math.random()*(innerHeight*0.7-size);
+  o.style.left=x+"px";
+  o.style.top=y+"px";
+  g.appendChild(o);
+
+  let used=false;
+  setTimeout(()=>{
+    if(!used&&o.parentNode){
+      o.remove();
+      // Penaliza si se escapa un objeto bueno
+      if(o.classList.contains("good")||
+         o.classList.contains("bonus")||
+         o.classList.contains("boss")){
+        life--;shake();vibBad();update();
+      }
+    }
+  },900);
+
+  o.onclick=(e)=>{
+    if(!running||used) return;
+    used=true;
+    particles(e.clientX,e.clientY);
+    o.remove();
+
+    if(o.classList.contains("good")){
+      score++;streak++;sGood();vibGood();
+      comboText(x,y,"+1");
+    }
+    if(o.classList.contains("bonus")){
+      score+=5;streak++;sBonus();vibBonus();
+      comboText(x,y,"+5");
+    }
+    if(o.classList.contains("bad")){
+      life--;streak=0;sBad();vibBad();shake();
+    }
+    if(o.classList.contains("bomb")){
+      life--;streak=0;sBad();vibBomb();shake();
+    }
+    if(o.classList.contains("boss")){
+      score+=20;sBoss();vibBoss();shake();
+      comboText(x,y,"BOSS!");
+    }
+    update();
+  };
+}
+
+function pauseGame(){
+  if(paused) return;
+  paused=true;running=false;
+  clearTimeout(loopId);
+  $("pause").style.display="flex";
+  sClick();vibMenu();
+}
+
+function resume(){
+  if(running) return;
+  paused=false;running=true;
+  $("pause").style.display="none";
+  sClick();vibMenu();
+  loop();
+}
+
+function goHome(){
+  running=false;paused=false;
+  clearTimeout(loopId);
+  saveScore();renderRank();
+  $("pause").style.display="none";
+  $("hud").style.display="none";
+  show("home");
+}
+
+function update(){
+  $("score").innerText=score;
+  $("life").innerText=life;
+  $("streak").innerText=streak;
+  if(life<=0) goHome();
+}
+
+/* INIT */
+renderRank();
+applyLang();  // FIX: carga todos los textos correctamente al inicio
+
+</script>
+</body>
+</html>
